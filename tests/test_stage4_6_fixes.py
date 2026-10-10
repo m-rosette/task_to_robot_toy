@@ -12,8 +12,8 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 from problem import ToyProblem  # noqa: E402
-from stage3_4 import classify_primitives  # noqa: E402
-from stage5_6 import _field_realizability, fk, solve_ik  # noqa: E402
+from legacy.stage3_4 import classify_primitives  # noqa: E402
+from legacy.stage5_6 import _field_realizability, fk, solve_ik  # noqa: E402
 
 
 def test_realizability_ik_uses_field_heading():

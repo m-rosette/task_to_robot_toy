@@ -1,6 +1,8 @@
 """
-Runs the full toy pipeline, Stage 1 -> Stage 6, and saves figures to
-../images/ and a JSON report to ../reports/.
+Legacy runner: the bracket-based pipeline (`legacy/`), Stage 1 -> Stage 6,
+kept so the earlier preliminary results stay reproducible. Saves figures to
+../images/ and a JSON report to ../reports/. The geodesic, reach-only
+pipeline is `run_geodesic_pipeline.py`.
 
 Usage:
     python run_pipeline.py [--problem one_obstacle|two_obstacles] [--seeds N] [--jobs J]
@@ -22,11 +24,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
 
-from problem import ToyProblem, PRESETS
-from field import bow_signs, desired_velocity, conservative_potential
-from stage1_2 import build_exact_generators
-from stage3_4 import analyze_lie_algebra, classify_primitives
-from stage5_6 import assemble_mechanism, validate_mechanism, fk
+from problem import ToyProblem, PRESETS, LEGACY_PRESETS
+from legacy.field import bow_signs, desired_velocity, conservative_potential
+from legacy.stage1_2 import build_exact_generators
+from legacy.stage3_4 import analyze_lie_algebra, classify_primitives
+from legacy.stage5_6 import assemble_mechanism, validate_mechanism, fk
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
 IMAGES = os.path.join(ROOT, "images")
@@ -377,7 +379,7 @@ def main(problem_name="one_obstacle", seeds=10, jobs=None):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--problem", default="one_obstacle", choices=sorted(PRESETS))
+    ap.add_argument("--problem", default="one_obstacle", choices=sorted(LEGACY_PRESETS))
     ap.add_argument("--seeds", type=int, default=10)
     ap.add_argument("--jobs", type=int, default=None)
     args = ap.parse_args()

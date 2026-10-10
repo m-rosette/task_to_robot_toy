@@ -27,8 +27,8 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
-from stage3_4 import analyze_lie_algebra  # noqa: E402
-from stage5_6 import jacobian  # noqa: E402
+from legacy.stage3_4 import analyze_lie_algebra  # noqa: E402
+from legacy.stage5_6 import jacobian  # noqa: E402
 
 N = 14
 W = 10.0 / N

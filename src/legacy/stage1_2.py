@@ -5,7 +5,7 @@ Stage 2: Discover the Minimal Differential Generators
 
 import numpy as np
 from problem import wrap_angle, twist_normalize
-from field import bow_signs, desired_velocity, desired_heading
+from legacy.field import bow_signs, desired_velocity, desired_heading
 
 
 def build_exact_generators(problem, signs=None, n_cells=14, min_twist_norm=1e-2,
