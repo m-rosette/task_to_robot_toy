@@ -1,49 +1,51 @@
 """
 Stage 3: Lower bounds on the mechanism.
 
-Three bounds that count different things and are reported separately:
+Stage 3 reports three separate bounds:
 
-1. Counting bound (total joints). A chain of n joints has at most n + 1
-   shared design values (one length or stroke per joint, plus the slide
-   direction of a leading prismatic joint) and n joint values per target.
-   Reaching K targets that fix c_k coordinates each needs
-   (n + 1) + n*K >= sum_k c_k. Taking the largest d = n + 1 keeps the bound
-   valid for every combination of that size.
+1. Counting bound (total joints). A chain of n joints has n + 1 or fewer
+   shared design values. These are one length or stroke for each joint and
+   the slide direction of a prismatic first joint. The chain has n joint
+   values for each target. K targets that fix c_k coordinates each need
+   (n + 1) + n*K >= sum_k c_k. The bound uses the maximum design-value
+   count, so it is valid for all combinations of n joints.
 
-2. Minimum-link bound (rotating joints). Links are straight and a prismatic
-   joint lengthens a segment without bending it, so the arm at a target
-   configuration is a polyline with one segment per rotating joint after
-   the first, plus one. If the fewest collision-free straight segments from
-   the base to target k is m_k, the arm needs at least m - 1 revolute
-   joints after its first joint, m = max_k m_k. (A revolute joint at the
-   base aims the first segment; it does not bend the chain.) m_k is found
-   with visibility levels on a grid (see `minimum_link_counts`).
+2. Minimum-link bound (revolute joints). Links are straight, and a prismatic
+   joint makes a segment longer without a bend. Thus at a target
+   configuration, the arm is a polyline with one segment for each revolute
+   joint after the first, plus one. Let m_k be the minimum number of
+   collision-free straight segments from the base to target k, and
+   m = max_k m_k. Then the arm needs at least m - 1 revolute joints after
+   its first joint. A revolute joint at the base sets the direction of the
+   first segment and does not bend the chain. `minimum_link_counts` finds
+   m_k with visibility levels on a grid.
 
-3. Length bound. The arm, probe included, is a curve from the base to each
-   target in free space, so its total length at full extension is at least
-   max_k L_min,k with L_min,k the geodesic distance from the base to target
-   k.
+3. Length bound. The arm, with the probe, is a curve in free space from the
+   base to each target. Thus its total length at full extension is at least
+   max_k L_min,k, where L_min,k is the geodesic distance from the base to
+   target k.
 
-The bounds use obstacles inflated by `link_radius` only (the hard collision
-constraint), not by the extra planning margin, so they stay lower bounds.
-The minimum-link count is approximate: intermediate bend points are limited
-to cell centers and frontier cells are subsampled, both of which can only
-overstate m_k. Its sensitivity to grid resolution is an ablation (E5).
+The bounds inflate the obstacles by `link_radius` only (the hard collision
+constraint), not by `clearance_margin`. Thus they stay lower bounds. The
+minimum-link count is approximate: bend points are cell centers, and the
+frontier cells are subsampled. Both approximations can only make m_k larger.
 """
 
 import dataclasses
 
 import numpy as np
+from scipy import ndimage
 
 from geodesic_field import geodesic_distance, interp, make_grid
 
 
 MAX_LINK_LEVELS = 6
 FRONTIER_SAMPLES = 300
+FOUR_NEIGHBORS = ndimage.generate_binary_structure(2, 1)
 
 
 def counting_bound(c_values, n_max=10):
-    """Smallest n with (n + 1) + n*K >= sum(c_k), over feasible targets."""
+    """Smallest n with (n + 1) + n*K >= sum(c_k) over the feasible targets."""
     c_values = [c for c in c_values if c is not None]
     K = len(c_values)
     total = int(sum(c_values))
@@ -54,8 +56,8 @@ def counting_bound(c_values, n_max=10):
 
 
 def _visible_from(problem, sources, cells, inflation, chunk=20):
-    """(len(sources), len(cells)) boolean: straight segment source -> cell
-    clears every obstacle by more than `inflation`."""
+    """(len(sources), len(cells)) boolean: True where the straight segment
+    source -> cell has a clearance more than `inflation`."""
     sources = np.atleast_2d(sources)
     out = np.zeros((len(sources), len(cells)), dtype=bool)
     for s in range(0, len(sources), chunk):
@@ -67,28 +69,23 @@ def _visible_from(problem, sources, cells, inflation, chunk=20):
 def _frontier(level_mask_grid, free_grid):
     """Cells in the current level with a free 4-neighbor outside it."""
     m = level_mask_grid
-    outside = free_grid & ~m
-    nb = np.zeros_like(m)
-    nb[1:, :] |= outside[:-1, :]
-    nb[:-1, :] |= outside[1:, :]
-    nb[:, 1:] |= outside[:, :-1]
-    nb[:, :-1] |= outside[:, 1:]
-    return m & nb
+    return m & ndimage.binary_dilation(free_grid & ~m, structure=FOUR_NEIGHBORS)
 
 
 def minimum_link_counts(problem, target_xys, resolution=None, inflation=None,
                         max_levels=MAX_LINK_LEVELS, frontier_samples=FRONTIER_SAMPLES):
-    """Fewest collision-free straight segments from the base to each target.
+    """Minimum number of collision-free straight segments from the base to
+    each target.
 
-    Visibility levels grow from the base: V1 = free cells visible from the
-    base, V(i+1) = V(i) plus the cells visible from (a deterministic sample
-    of) V(i)'s frontier. Each target is matched from its own side (meet in
-    the middle): with W = free cells visible from the target, m_k = 1 if the
-    target is visible from the base, else the first i + 1 with
-    V(i) & W nonempty.
+    Visibility levels grow from the base. V1 is the set of free cells
+    visible from the base. V(i+1) is V(i) plus the cells visible from a
+    deterministic sample of the frontier of V(i). Each target also has W,
+    the set of free cells visible from the target (meet in the middle).
+    m_k = 1 if the base sees the target. Otherwise, m_k is the first
+    i + 1 where V(i) & W is not empty.
 
-    Returns (m_k list, info) where info holds the level map (first level of
-    every free cell, 0 = beyond `max_levels`) and the grid used.
+    Returns (m_k list, info). info has the level map (first level of each
+    free cell, 0 = more than `max_levels`) and the grid.
     """
     infl = problem.link_radius if inflation is None else inflation
     grid = make_grid(problem, resolution or problem.grid_resolution / 2)
@@ -135,7 +132,7 @@ def minimum_link_counts(problem, target_xys, resolution=None, inflation=None,
                 break
             i += 1
         m_k.append(m)
-    # finish the level map for plotting
+    # complete the level map for the plot
     while len(levels) < max_levels and grow():
         pass
     return m_k, {"level_map": level_map, "free": free, "grid": grid,
@@ -153,11 +150,10 @@ def compute_bounds(problem, target_sets, link_resolution=None):
     m = max(known) if known else None
     rotating_floor = None if m is None else max(m - 1, 0)
 
-    # Length bound on a grid inflated by link_radius only (the hard
-    # constraint), less half a cell diagonal: a cell then counts as free
-    # whenever any point of it is truly free, so the grid's free space
-    # contains the true one and its geodesic distance does not overstate
-    # the true shortest length.
+    # The length bound uses a grid inflated by link_radius (the hard
+    # constraint) minus half a cell diagonal. A cell is free if any point in
+    # it is free. Thus the grid free space contains the true free space, and
+    # the grid geodesic distance is not more than the true shortest length.
     h = 1.0 / problem.grid_resolution
     hard = dataclasses.replace(problem, clearance_margin=-np.sqrt(0.5) * h)
     grid = make_grid(hard)

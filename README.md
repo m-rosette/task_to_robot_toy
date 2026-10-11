@@ -19,7 +19,7 @@ The repository holds two pipelines:
 |---|---|
 | `src/problem.py` | Task definition (`ToyProblem`, presets), fixed physical parameters (base angle, probe, link radius, margin, grid), exact segment clearance, SE(2) and twist-metric helpers |
 | `src/targets.py` | Stage 1: target pose sets. Heading bands are sampled and pruned where the probe would hit an inflated obstacle; each target fixes c_k = 2 (interval) or 3 (exact heading) coordinates |
-| `src/geodesic_field.py` | Stage 2: per-target geodesic distance (fast marching), field = -grad d, dead-band orientation rule, RK4 reach paths, route ties, and an adapter to the legacy `stage2_results` shape |
+| `src/geodesic_field.py` | Stage 2: per-target geodesic distance (fast marching), field = -grad d, dead-band orientation rule, RK4 reach paths, and route ties |
 | `src/bounds.py` | Stage 3: counting bound (total joints), minimum-link bound (revolute joints after the first), length bound |
 | `src/classes.py` | Stage 4a: motion-class coset tests, admissible joint combinations, rho |
 | `src/priors.py` | Stage 4b: segment paths (constrained Douglas–Peucker), bend clusters, approach cones, starting designs |

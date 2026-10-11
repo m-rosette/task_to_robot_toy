@@ -1,36 +1,33 @@
 """
 Stage 1: Target pose sets.
 
-Each target is a position plus a heading band [theta - tol, theta + tol].
-The band is sampled, and every heading at which the probe (length
-`probe_length`, ending at the target point and pointing along the heading)
-would come within the planning inflation (`link_radius + clearance_margin`)
-of an obstacle is removed. What remains is the target's pose set:
+Each target is a position and a heading band [theta - tol, theta + tol].
+Stage 1 samples the band. It removes each heading at which the probe is less
+than the planning inflation (`link_radius + clearance_margin`) from an
+obstacle. The probe has length `probe_length`, ends at the target point, and
+points along the heading. The headings that stay are the pose set of the
+target:
 
-- empty: no arm can reach the target with an acceptable heading (infeasible);
-- a single sample or a band narrower than `NARROW_BAND`: heading is fixed,
-  so the target fixes c_k = 3 coordinates (x, y, theta);
-- an interval: heading is free inside it, so the target fixes c_k = 2.
+- Empty: no arm can reach the target with an acceptable heading
+  (infeasible).
+- One sample, or a band narrower than `NARROW_BAND`: the heading is fixed,
+  and the target fixes c_k = 3 coordinates (x, y, theta).
+- An interval: the heading is free in the interval, and the target fixes
+  c_k = 2 coordinates.
 
-The pruned band is stored as a list of contiguous intervals (absolute
-angles, unwrapped around the nominal heading), since an obstacle can split
-a wide band in two.
+The pruned band is a list of contiguous intervals (absolute angles,
+unwrapped around the nominal heading). An obstacle can divide a wide band
+into two intervals.
 """
 
 import numpy as np
+from scipy import ndimage
 
 from problem import wrap_angle
 
 
-SAMPLE_STEP = np.deg2rad(1.0)   # heading discretization of each band
+SAMPLE_STEP = np.deg2rad(1.0)   # heading sample step in each band
 NARROW_BAND = np.deg2rad(2.0)   # a band narrower than this fixes the heading (c_k = 3)
-
-
-def probe_segment(xy, heading, probe_length):
-    """Probe as a segment (back end, tip) with the tip at `xy`."""
-    xy = np.asarray(xy, dtype=float)
-    u = np.array([np.cos(heading), np.sin(heading)])
-    return xy - probe_length * u, xy
 
 
 def _band_samples(theta, tol):
@@ -40,26 +37,19 @@ def _band_samples(theta, tol):
     return theta + np.linspace(-tol, tol, n + 1)
 
 
-def _runs(samples, keep):
+def intervals_of(samples, keep):
     """Contiguous runs of kept samples -> list of (lo, hi) intervals."""
-    out = []
-    start = None
-    for i, k in enumerate(keep):
-        if k and start is None:
-            start = i
-        if (not k or i == len(keep) - 1) and start is not None:
-            end = i if k else i - 1
-            out.append((float(samples[start]), float(samples[end])))
-            start = None
-    return out
+    labels, _ = ndimage.label(keep)
+    return [(float(samples[sl.start]), float(samples[sl.stop - 1])) for (sl,) in ndimage.find_objects(labels)]
 
 
 def build_target_sets(problem):
-    """Stage 1: one pose set per target in `problem.targets_list`.
+    """Stage 1: one pose set for each target in `problem.targets_list`.
 
-    Returns a list of dicts with the nominal target, the original band, the
-    sampled headings and which survived pruning, the pruned intervals,
-    `c_k`, `frac_removed`, and `feasible`.
+    Returns a list of dicts. Each dict has the nominal target, the
+    original band, the sampled headings, and the mask of kept headings.
+    It also has the pruned intervals, `c_k`, `frac_removed`, `feasible`,
+    and `target_clearance`.
     """
     out = []
     infl = problem.inflation
@@ -70,7 +60,7 @@ def build_target_sets(problem):
         backs = xy[None, :] - problem.probe_length * u
         clear = problem.segment_clearance(backs, xy[None, :])
         keep = clear > infl
-        intervals = _runs(samples, keep)
+        intervals = intervals_of(samples, keep)
         if not intervals:
             c_k = None
         else:
@@ -94,9 +84,9 @@ def build_target_sets(problem):
 
 
 def heading_residual(heading, intervals):
-    """Signed distance from `heading` to the nearest pruned interval (0 when
-    inside one). The sign is that of (heading - nearest edge), so the
-    derivative with respect to the heading is +1 outside the band."""
+    """Signed distance from `heading` to the nearest pruned interval (0 in
+    an interval). The sign is the sign of (heading - nearest edge). Thus
+    the derivative with respect to the heading is +1 outside the band."""
     best = None
     for lo, hi in intervals:
         mid = 0.5 * (lo + hi)
@@ -106,20 +96,6 @@ def heading_residual(heading, intervals):
         if best is None or abs(r) < abs(best):
             best = r
     return 0.0 if best is None else float(best)
-
-
-def common_heading_intervals(target_sets, step=SAMPLE_STEP):
-    """Headings (sampled on a circle) that lie inside the pruned band of
-    every feasible target. Returns (headings, counts) over a full-circle
-    grid, where counts[i] is how many targets' bands contain headings[i]."""
-    grid = np.arange(-np.pi, np.pi, step)
-    counts = np.zeros(len(grid), dtype=int)
-    for ts in target_sets:
-        if not ts["feasible"]:
-            continue
-        inside = np.array([heading_residual(h, ts["intervals"]) == 0.0 for h in grid])
-        counts += inside
-    return grid, counts
 
 
 def serialize_target_sets(target_sets):

@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 from bounds import compute_bounds, counting_bound, minimum_link_counts  # noqa: E402
 from classes import classify_task  # noqa: E402
-from geodesic_field import build_geodesic_field, geodesic_distance, interp, make_grid, to_stage2_results  # noqa: E402
+from geodesic_field import build_geodesic_field, geodesic_distance, interp, make_grid  # noqa: E402
 from priors import build_priors  # noqa: E402
 from problem import ToyProblem, PRESETS  # noqa: E402
 from stage5_6 import body_segments, build_context, fk, jacobian, search_mechanism  # noqa: E402
@@ -24,7 +24,7 @@ from targets import build_target_sets  # noqa: E402
 
 def _tangent_arc_tangent(p, q, c, r):
     """Shortest path length from p to q around a circle (center c, radius r)
-    whose interior blocks the straight segment."""
+    that blocks the straight segment."""
     p, q, c = (np.asarray(v, float) for v in (p, q, c))
     dp, dq = np.linalg.norm(p - c), np.linalg.norm(q - c)
     ang = np.arccos(np.clip((p - c) @ (q - c) / (dp * dq), -1, 1))
@@ -93,7 +93,7 @@ def test_geodesic_distance_around_one_circle():
         d = interp(geodesic_distance(grid, P.target), grid, np.asarray(P.base))
         exact = _tangent_arc_tangent(P.base, P.target, (5.0, 5.0), 1.0 + P.inflation)
         assert abs(d - exact) < 0.005 * exact, (d, exact)
-    # the uninflated value quoted in the plan
+    # tangent-arc-tangent length without inflation
     assert abs(_tangent_arc_tangent((1, 1), (8.5, 8.0), (5, 5), 1.0) - 10.39) < 0.01
 
 
@@ -109,12 +109,12 @@ def test_reach_paths_start_end_and_stay_free():
                 assert rp["reached"], (name, s["index"], rp["label"])
                 assert np.allclose(pts[0], P.base)
                 assert np.linalg.norm(pts[-2] - s["xy"]) <= h + 1e-9
-                # never enters the inflated obstacles, up to one cell of grid error
+                # the path stays out of the inflated obstacles, within one cell of grid error
                 assert P.clearance_field(pts).min() >= P.inflation - h, (name, s["index"])
 
 
 def test_route_tie_behind_obstacle_is_resolved():
-    """(7, 7) lies on the cut locus behind the obstacle; both walled routes
+    """(7, 7) is on the cut locus behind the obstacle. The two walled routes
     reach it with equal length."""
     P = ToyProblem(targets=((7.0, 7.0, np.deg2rad(75.0), np.deg2rad(40.0)),))
     F = build_geodesic_field(P, build_target_sets(P))
@@ -123,28 +123,19 @@ def test_route_tie_behind_obstacle_is_resolved():
     assert abs(rps[0]["geodesic_length"] - rps[1]["geodesic_length"]) < 1e-6
 
 
-def test_compatibility_adapter_shape():
-    P = ToyProblem()
-    F = build_geodesic_field(P, build_target_sets(P))
-    res, meta = to_stage2_results(P, F)
-    assert len(res) > 100 and meta["n_cells"] == 14
-    r = next(iter(res.values()))
-    assert r["generators"].shape == (1, 3) and r["intrinsic_dim"] == 1 and "heading" in r
-
-
 # --------------------------------------------------------------------------
 # Stage 1 and Stage 3
 # --------------------------------------------------------------------------
 
 def test_tolerance_pruning():
-    # probe pointing back toward the obstacle on part of the band
+    # on part of the band, the probe points back toward the obstacle
     P = ToyProblem(targets=((6.4, 5.6, np.deg2rad(65.0), np.deg2rad(40.0)),
                             # every heading puts the probe inside the inflated obstacle
                             (6.2, 5.0, np.deg2rad(0.0), np.deg2rad(5.0))))
     a, b = build_target_sets(P)
     assert 0.0 < a["frac_removed"] < 1.0 and a["c_k"] == 2 and a["feasible"]
     lo = min(i[0] for i in a["intervals"])
-    assert lo > a["band"][0]  # the low end (probe toward the obstacle) is pruned
+    assert lo > a["band"][0]  # Stage 1 removes the low end (probe toward the obstacle)
     assert not b["feasible"] and b["c_k"] is None and b["frac_removed"] == 1.0
     # an exact heading fixes three coordinates
     (c,) = build_target_sets(ToyProblem(target_theta_tol=0.0))
@@ -239,7 +230,7 @@ def test_search_stops_early_and_reports_smaller_failures():
     ctx = build_context(P, ts, b, c, build_priors(P, ts, F))
     S = search_mechanism(P, ctx, seed=0, starts="priors")
     assert S["selected_n"] == 2 and S["mechanism"]["feasible"]
-    assert all(len(cmb) == 2 for cmb in S["fit_order"])  # never reached 3 joints
+    assert all(len(cmb) == 2 for cmb in S["fit_order"])  # the search does not reach 3 joints
     assert sorted(m["combo"] for m in S["minimality"]) == ["P", "R"]
     assert S["minimality_holds"] and S["first_feasible_evals"] is not None
 

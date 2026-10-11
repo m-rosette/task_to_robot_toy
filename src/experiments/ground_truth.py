@@ -1,18 +1,20 @@
 """
 E4: Ground-truth recovery.
 
-Generate tasks from known mechanisms: pick a joint combination and design,
-sample collision-free configurations, and turn their probe-tip poses into
-targets (heading band centered on the generating heading). Then run Stages
-1-4 (and optionally Stage 5) and check that
+Makes tasks from known mechanisms. For each generator (joint combination and
+design), it samples collision-free configurations and makes targets from
+their probe-tip poses (heading band centered on the generator heading). Then
+it runs Stages 1-4 (and optionally Stage 5) and checks that:
 
-- the generating combination is admissible,
-- no bound exceeds what the generating mechanism has (counting bound <=
-  its joint count, rotating-joint floor <= its revolute joints after the
-  first, length bound <= its total length at full extension), and
-- the predicted bend clusters sit near the generating elbows (prior
-  location error: distance from each generating revolute joint after the
-  first, at each target configuration, to the nearest bend cluster).
+- the generator combination is admissible
+- the counting bound is not more than the generator joint count
+- the rotating-joint floor is not more than the generator revolute joints
+  after the first
+- the length bound is not more than the generator total length at full
+  extension
+- the predicted bend clusters are near the generator elbows. The prior
+  location error is the distance from each generator revolute joint after
+  the first, at each target configuration, to the nearest bend cluster.
 
 Usage (from src/):
     ../.venv/bin/python experiments/ground_truth.py [--trials 4] [--search]
@@ -38,7 +40,7 @@ from targets import build_target_sets  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Generating mechanisms: (combo, lengths (R link / P housing), strokes, slide angle)
+# Generator mechanisms: (combo, lengths (R link / P housing), strokes, slide angle)
 GENERATORS = [
     ("RR", [5.8, 4.2], [0, 0], None),
     ("PR", [2.0, 4.0], [3.0, 0], 0.55),
@@ -50,8 +52,8 @@ OBSTACLES = ((5.0, 5.0, 1.0),)
 
 
 def generate_task(combo, lengths, strokes, slide, K, tol, rng, obstacles=OBSTACLES, max_tasks=200):
-    """A task the generating design provably solves: it passes the same
-    feasibility check as Stage 5 (transitions included)."""
+    """Task that the generator design solves. The task passes the Stage 5
+    feasibility check, with transitions."""
     for _ in range(max_tasks):
         P, design, Q = _sample_task(combo, lengths, strokes, slide, K, tol, rng, obstacles)
         if len(Q) < K:
@@ -73,7 +75,7 @@ def _sample_task(combo, lengths, strokes, slide, K, tol, rng, obstacles, max_tri
     for _ in range(max_tries):
         if len(targets) == K:
             break
-        # each elbow bends one way for the whole task (one assembly mode), up to 90 deg
+        # each elbow bends in one direction for the full task (one assembly mode), up to 90 deg
         q = np.array([signs[i] * rng.uniform(0.0, np.pi / 2) if t == "R" else rng.uniform(0, s)
                       for i, (t, s) in enumerate(zip(combo, design["strokes"]))])
         if combo[0] == "R":

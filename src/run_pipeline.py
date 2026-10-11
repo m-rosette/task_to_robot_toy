@@ -1,8 +1,7 @@
 """
-Legacy runner: the bracket-based pipeline (`legacy/`), Stage 1 -> Stage 6,
-kept so the earlier preliminary results stay reproducible. Saves figures to
-../images/ and a JSON report to ../reports/. The geodesic, reach-only
-pipeline is `run_geodesic_pipeline.py`.
+Legacy runner for the bracket-based pipeline (`legacy/`), Stage 1 -> Stage 6.
+Saves figures to ../images/ and a JSON report to ../reports/.
+`run_geodesic_pipeline.py` runs the geodesic, reach-only pipeline.
 
 Usage:
     python run_pipeline.py [--problem one_obstacle|two_obstacles] [--seeds N] [--jobs J]
@@ -28,7 +27,7 @@ from problem import ToyProblem, PRESETS, LEGACY_PRESETS
 from legacy.field import bow_signs, desired_velocity, conservative_potential
 from legacy.stage1_2 import build_exact_generators
 from legacy.stage3_4 import analyze_lie_algebra, classify_primitives
-from legacy.stage5_6 import assemble_mechanism, validate_mechanism, fk
+from legacy.stage5_6 import assemble_mechanism, validate_mechanism
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
 IMAGES = os.path.join(ROOT, "images")

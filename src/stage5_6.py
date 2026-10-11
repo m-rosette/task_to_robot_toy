@@ -2,47 +2,42 @@
 Stage 5: Reduced search
 Stage 6: Validation
 
-Stage 5 fits every admissible joint combination (Stage 4) directly, smallest
-joint count first, and stops at the first joint count with a feasible
-design. Each fit solves for one shared design and one configuration per
-target at once:
+Stage 5 fits each admissible joint combination (Stage 4), smallest joint
+count first. It stops at the first joint count that has a feasible design.
+Each fit solves for one shared design and one configuration for each target:
 
-- design variables: a link length per revolute joint, a housing length and
-  a stroke per prismatic joint, and the slide direction (`slide_angle`) when
-  the first joint is prismatic. The base angle and probe length are fixed
-  by the problem.
-- residuals: probe-tip position error and heading-band violation at every
-  target, a hinge on body clearance (links and probe) below the planning
-  inflation at every target configuration and at samples along the
-  joint-space transitions between consecutive targets, a hinge on body
-  points outside the workspace box, and a small regularizer on total length.
+- Design variables: a link length for each revolute joint, a housing length
+  and a stroke for each prismatic joint, and `slide_angle` when the first
+  joint is prismatic. The problem fixes the base angle and the probe length.
+- Residuals: the probe-tip position error and heading-band violation at each
+  target, a hinge on body clearance below the planning inflation, a hinge on
+  body points outside the workspace box, and a small regularizer on the
+  total length. The hinges apply at each target configuration and at samples
+  on the joint-space transitions between consecutive targets.
 
-A design is *feasible* when every target is reached within `POS_TOL_FRAC`
-of the length scale with its heading inside the pruned band, and no body
-segment comes within `link_radius` of an obstacle or leaves the workspace
-box at any target configuration or along any transition (checked densely).
-Workspace containment keeps the arm inside the region the field and the
-bounds were computed on. Among feasible
-designs, the score is conditioning (1 - the smallest sigma ratio over
-target configurations) plus a small length regularizer; lower is better.
-Following the field's twists is not required for a reaching task, so
-field realizability is no longer part of the objective.
+A design is feasible when these conditions are true at each target
+configuration and along each transition (dense check):
+
+- The probe tip is within `POS_TOL_FRAC` * length scale of the target.
+- The heading is in the pruned band.
+- The clearance of each body segment is at least `link_radius`.
+- The body is in the workspace box.
+
+The score of a feasible design is (1 - smallest sigma ratio over the target
+configurations) plus a small length regularizer. A lower score is better.
 
 If no admissible combination of the selected class is feasible, the search
-escalates to the next covering class (see `classes.py`; this is how a
-common-heading task reaches SE(2) when prismatic-only chains, confined to a
-ray from the base, cannot cover it).
+continues with the next covering class (see `classes.py`).
 
 Kinematics (`fk`): straight links, no fixed bends. A revolute joint rotates
-the chain and is followed by a link; a prismatic joint is a telescoping
-segment of housing length h plus extension q in [0, stroke] along the
-current heading. A fixed probe of `probe_length` follows the last joint;
-the end-effector is the probe tip and its heading is the last link's
-direction. The chain's initial heading is the problem's fixed `base_angle`,
-or `slide_angle` when the first joint is prismatic.
+the chain, and a link follows it. A prismatic joint is a telescopic segment:
+housing length h plus extension q in [0, stroke], along the current heading.
+A fixed probe of `probe_length` follows the last joint. The end-effector is
+the probe tip, and its heading is the last link direction. The initial
+heading is `base_angle`, or `slide_angle` when the first joint is prismatic.
 
-Twists are hybrid (EE-point velocity, omega); `jacobian()` returns them in
-that convention, and conditioning uses the unit-consistent metric in
+Twists are hybrid (EE-point velocity, omega). `jacobian()` returns them in
+this convention. Conditioning uses the unit-consistent metric in
 `problem.py`.
 """
 
@@ -53,21 +48,21 @@ from scipy.optimize import least_squares
 
 from classes import ALL_COMBINATIONS, class_combinations, rotating_after_first
 from priors import design_prior
-from problem import to_dimensionless, wrap_angle
+from problem import to_dimensionless
 from targets import heading_residual
 
 
-MIN_LENGTH = 0.05      # floor on link lengths, housings, and strokes
-POS_TOL_FRAC = 0.01    # feasibility: target position error <= this * length_scale
-HEADING_SLACK = 1e-3   # feasibility: heading may leave its pruned band by this (rad)
-SINGULAR_RATIO = 1e-2  # sigma_min / sigma_max below this counts as near-singular
+MIN_LENGTH = 0.05      # minimum link length, housing length, and stroke
+POS_TOL_FRAC = 0.01    # feasibility: position error <= POS_TOL_FRAC * length_scale
+HEADING_SLACK = 1e-3   # feasibility: maximum heading error outside the pruned band (rad)
+SINGULAR_RATIO = 1e-2  # sigma_min / sigma_max below this value is near-singular
 
 W_POS, W_HEAD, W_COL, W_REG = 10.0, 3.0, 10.0, 0.03
 FIT_TRANSITION_SAMPLES = 6
 CHECK_TRANSITION_SAMPLES = 25
-FIT_MAX_NFEV = 200     # least-squares iterations per start (Jacobian estimates not counted by scipy)
-N_RESTARTS = 3         # starting points per combination and seed
-LENGTH_BOUND_FACTOR = 1.2  # each design length is at most this times the length bound
+FIT_MAX_NFEV = 200     # max_nfev per start (scipy does not count Jacobian estimates)
+N_RESTARTS = 3         # start points per combination and seed
+LENGTH_BOUND_FACTOR = 1.2  # maximum design length = LENGTH_BOUND_FACTOR * length bound
 
 START_MODES = ("priors", "random", "legacy_icr")
 
@@ -84,18 +79,19 @@ def initial_heading(joint_types, base_angle=0.0, slide_angle=None):
 
 def fk(base, joint_types, dof, lengths, base_angle=0.0, probe_length=0.0, slide_angle=None):
     """Forward kinematics of a planar serial chain of revolute ('R') and
-    prismatic ('P') joints anchored at `base`, with a fixed probe.
+    prismatic ('P') joints. The chain starts at `base` and ends in a
+    fixed probe.
 
-    - Revolute joint i: dof[i] is the joint angle; lengths[i] is the link
-      traversed along the new heading.
-    - Prismatic joint i: lengths[i] is the housing; dof[i] >= 0 is the
-      extension beyond it, so the segment is lengths[i] + dof[i] long.
-    - After the last joint, the probe extends `probe_length` along the
-      current heading.
+    - Revolute joint i: dof[i] is the joint angle. lengths[i] is the link
+      length along the new heading.
+    - Prismatic joint i: lengths[i] is the housing length. dof[i] >= 0 is
+      the extension, so the segment length is lengths[i] + dof[i].
+    - The probe extends `probe_length` along the heading after the last
+      joint.
 
     Returns the probe-tip pose (x, y, theta) and the joint positions: the
-    base, then the end of each joint's segment (the last one is where the
-    probe is mounted).
+    base, then the end of each joint segment. The last position is the
+    probe mount.
     """
     x, y = float(base[0]), float(base[1])
     phi = initial_heading(joint_types, base_angle, slide_angle)
@@ -114,8 +110,8 @@ def fk(base, joint_types, dof, lengths, base_angle=0.0, probe_length=0.0, slide_
 
 
 def body_segments(base, joint_types, dof, lengths, base_angle=0.0, probe_length=0.0, slide_angle=None):
-    """Segments occupied by the body at configuration `dof`: one per joint
-    (revolute link, or prismatic housing plus extension), then the probe."""
+    """Body segments at configuration `dof`: one for each joint (revolute
+    link, or prismatic housing plus extension), then the probe."""
     tip, joints = fk(base, joint_types, dof, lengths, base_angle, probe_length, slide_angle)
     segs = [(joints[i], joints[i + 1]) for i in range(len(joint_types))]
     segs.append((joints[-1], tip[:2]))
@@ -123,9 +119,9 @@ def body_segments(base, joint_types, dof, lengths, base_angle=0.0, probe_length=
 
 
 def jacobian(base, joint_types, dof, lengths, base_angle=0.0, probe_length=0.0, slide_angle=None):
-    """Geometric Jacobian mapping joint velocities to the probe tip's hybrid
-    twist (vx, vy, omega). Revolute columns are z x (p_tip - p_i) with
-    omega 1; prismatic columns are the segment direction with omega 0."""
+    """Geometric Jacobian from joint velocities to the hybrid twist
+    (vx, vy, omega) of the probe tip. A revolute column is
+    (z x (p_tip - p_i), 1). A prismatic column is (segment direction, 0)."""
     n = len(joint_types)
     tip, joints = fk(base, joint_types, dof, lengths, base_angle, probe_length, slide_angle)
     p = tip[:2]
@@ -142,7 +138,7 @@ def jacobian(base, joint_types, dof, lengths, base_angle=0.0, probe_length=0.0, 
 
 def fk_batch(base, joint_types, Q, lengths, base_angle=0.0, probe_length=0.0, slide_angle=None):
     """Vectorized `fk` over configurations Q (M, n). Returns points
-    (M, n + 2, 2) -- base, segment ends, probe tip -- and headings (M,)."""
+    (M, n + 2, 2) (base, segment ends, probe tip) and headings (M,)."""
     Q = np.atleast_2d(Q)
     M = Q.shape[0]
     phi = np.full(M, initial_heading(joint_types, base_angle, slide_angle))
@@ -179,7 +175,7 @@ def design_jacobian(problem, design, dof):
 
 
 def total_length(problem, design):
-    """Arm length at full extension, probe included."""
+    """Arm length at full extension, with the probe."""
     jt = design["joint_types"]
     return float(sum(design["lengths"]) + sum(s for t, s in zip(jt, design["strokes"]) if t == "P")
                  + problem.probe_length)
@@ -191,9 +187,9 @@ def _sigma_ratio(J, L):
 
 
 # --------------------------------------------------------------------------
-# Design vector packing. Joint values in the fit are revolute angles and
-# prismatic stroke *fractions* t in [0, 1] (q = t * stroke), so the stroke
-# bound stays a box bound while the stroke itself is a design variable.
+# Design vector packing. In the fit, a revolute joint value is an angle and
+# a prismatic joint value is a stroke fraction t in [0, 1] (q = t * stroke).
+# Thus the stroke bound is a box bound, and the stroke is a design variable.
 # --------------------------------------------------------------------------
 
 def _layout(combo):
@@ -248,7 +244,8 @@ def _joint_box(combo):
 
 
 def _t_to_q(T, design):
-    """Stroke fractions -> physical prismatic extensions (revolute unchanged)."""
+    """Stroke fractions -> prismatic extensions. Revolute values do not
+    change."""
     Q = np.array(T, dtype=float, copy=True)
     for j, t in enumerate(design["joint_types"]):
         if t == "P":
@@ -256,16 +253,8 @@ def _t_to_q(T, design):
     return Q
 
 
-def _q_to_t(Q, design):
-    T = np.array(Q, dtype=float, copy=True)
-    for j, t in enumerate(design["joint_types"]):
-        if t == "P":
-            T[..., j] = T[..., j] / max(design["strokes"][j], 1e-12)
-    return T
-
-
 class EvalCounter:
-    """Counts residual-function evaluations, Jacobian estimates included."""
+    """Counts residual-function evaluations, with Jacobian estimates."""
 
     def __init__(self):
         self.n = 0
@@ -278,14 +267,14 @@ class EvalCounter:
 
 
 # --------------------------------------------------------------------------
-# IK (used to initialize the per-target configurations of a start design)
+# IK (initial per-target configurations of a start design)
 # --------------------------------------------------------------------------
 
 def solve_ik(problem, design, target_set, dof0=None, n_restarts=4, rng=None, counter=None):
-    """Bounded least-squares IK for one target's pose set: probe-tip position
-    error plus distance of the heading from the pruned band. `dof0` and the
-    returned configuration use stroke fractions for prismatic joints.
-    Returns (t-form dof, cost)."""
+    """Bounded least-squares IK for one target pose set. The residuals are
+    the probe-tip position error and the heading distance from the pruned
+    band. `dof0` and the result use stroke fractions for prismatic
+    joints. Returns (t-form dof, cost)."""
     combo = design["joint_types"]
     rng = rng or np.random.default_rng(0)
     L = problem.length_scale
@@ -314,13 +303,14 @@ def solve_ik(problem, design, target_set, dof0=None, n_restarts=4, rng=None, cou
 
 
 # --------------------------------------------------------------------------
-# Evaluation of a fitted design (shared by the fit and Stage 6)
+# Evaluation of a fitted design (fit and Stage 6)
 # --------------------------------------------------------------------------
 
 def _transition_configs(Q, order, n_samples):
     """Linear joint-space interpolation between consecutive targets in
-    `order` (revolute angles as fitted, so the fit chooses the direction of
-    rotation). Returns (configs (M, n), pair index per config)."""
+    `order`. Revolute angles are not wrapped, so the fit sets the
+    direction of rotation. Returns (configs (M, n), pair index of each
+    config)."""
     out, pair = [], []
     s = np.arange(1, n_samples + 1) / (n_samples + 1)
     for p, (a, b) in enumerate(zip(order[:-1], order[1:])):
@@ -343,16 +333,16 @@ def _clearances(problem, design, Q, pts=None):
 
 
 def _outside(problem, pts):
-    """How far each body point lies outside the workspace box (0 inside).
-    Segments between inside points stay inside, since the box is convex."""
+    """Distance of each body point outside the workspace box (0 inside). The
+    box is convex, so a segment between two inside points is inside."""
     xmin, ymin, xmax, ymax = problem.bounds
     return np.maximum.reduce([xmin - pts[..., 0], pts[..., 0] - xmax, ymin - pts[..., 1], pts[..., 1] - ymax,
                               np.zeros(pts.shape[:-1])])
 
 
 def evaluate_design(problem, design, Q, target_sets, order, n_transition=CHECK_TRANSITION_SAMPLES):
-    """Feasibility and quality of `design` at per-target configurations Q
-    (physical units, rows in `target_sets` order)."""
+    """Feasibility and quality of `design` at the per-target configurations
+    Q (physical units, rows in `target_sets` order)."""
     L = problem.length_scale
     per = []
     for k, ts in enumerate(target_sets):
@@ -407,11 +397,11 @@ def evaluate_design(problem, design, Q, target_sets, order, n_transition=CHECK_T
 
 
 # --------------------------------------------------------------------------
-# Stage 5: fitting one combination
+# Stage 5: fit of one combination
 # --------------------------------------------------------------------------
 
 def target_order(problem, target_sets):
-    """Nearest-neighbor tour, starting from the target nearest the base."""
+    """Nearest-neighbor tour. It starts at the target nearest to the base."""
     P = np.array([ts["xy"] for ts in target_sets])
     cur = np.asarray(problem.base, float)
     left = list(range(len(P)))
@@ -425,7 +415,7 @@ def target_order(problem, target_sets):
 
 
 def _start_point(problem, combo, mode, rng, ctx, attempt):
-    """Starting design (and optional t-form configurations) for one fit."""
+    """Start design (and optional t-form configurations) for one fit."""
     n = len(combo)
     lmax = ctx["lmax"]
     if mode == "priors":
@@ -467,10 +457,10 @@ def _start_point(problem, combo, mode, rng, ctx, attempt):
 
 
 def fit_combination(problem, combo, ctx, seed=0, mode="priors", n_restarts=N_RESTARTS):
-    """Fit one joint combination to all targets at once, from up to
-    `n_restarts` starting points of the given mode, stopping at the first
-    feasible fit. Returns the best fit (feasible first, then lowest score or
-    residual) with evaluation counts and wall-clock time."""
+    """Fits one joint combination to all targets. It tries up to
+    `n_restarts` start points of the given mode and stops at the first
+    feasible fit. Returns the best fit (feasible first, then lowest score
+    or residual), with evaluation counts and wall-clock time."""
     t_start = time.perf_counter()
     rng = np.random.default_rng([seed, ALL_COMBINATIONS.index(combo), START_MODES.index(mode)])
     tsets, order = ctx["target_sets"], ctx["order"]
@@ -553,8 +543,8 @@ def build_context(problem, target_sets, bounds, classes, priors, icr_clusters=No
 
 
 def _exclusion_reason(combo, classes, final_class=None):
-    """Why `combo` was not admissible in `final_class` (the class the search
-    ended in), or None if it was."""
+    """Reason why `combo` is not admissible in `final_class` (the class
+    where the search stopped), or None if it is admissible."""
     sel = final_class or classes["selected_class"]
     if sel is not None and combo not in class_combinations(sel):
         return "class"
@@ -566,11 +556,12 @@ def _exclusion_reason(combo, classes, final_class=None):
 
 
 def search_mechanism(problem, ctx, seed=0, starts="priors", n_restarts=N_RESTARTS, minimality=True):
-    """Stage 5: fit admissible combinations smallest joint count first,
-    stop at the first count with a feasible design (escalating to the next
-    covering class if the selected class has none), then fit the
-    combinations one joint smaller with the same budget as minimality
-    evidence. Returns the selected mechanism and the full search record."""
+    """Stage 5: fits the admissible combinations, smallest joint count
+    first, and stops at the first count with a feasible design. If the
+    selected class has no feasible design, the search continues with the
+    next covering class. Then it fits all combinations with one joint
+    fewer, with the same budget, as minimality evidence. Returns the
+    selected mechanism and the full search record."""
     t0 = time.perf_counter()
     fitted = {}
     fit_order = []
@@ -626,19 +617,20 @@ def search_mechanism(problem, ctx, seed=0, starts="priors", n_restarts=N_RESTART
 # --------------------------------------------------------------------------
 
 def validate_mechanism(problem, mechanism, ctx):
-    """Stage 6: independent re-check of a fitted mechanism.
+    """Stage 6: independent check of a fitted mechanism.
 
-    - per target: reach, heading inside the pruned band, clearance (probe
-      included), sigma ratio of the dimensionless Jacobian, and whether a
-      heading change is available with zero position change
-      (`heading_adjustable`: J has a null direction for the tip position
-      that rotates the tip, and the pruned band has width);
-    - clearance along every transition, sampled twice as densely as the
-      search's check;
-    - bend vs. elbow: distance from each revolute joint after the first (at
-      each target configuration) to the nearest predicted bend cluster and
-      to the nearest bend of that target's own segment paths;
-    - bound consistency against Stage 3.
+    - At each target: reach, heading in the pruned band, clearance (with
+      the probe), sigma ratio of the dimensionless Jacobian, and
+      `heading_adjustable`. `heading_adjustable` is true when J has a
+      null direction for the tip position that rotates the tip, and the
+      pruned band has a width.
+    - Clearance along each transition, with twice the sample density of
+      the search check.
+    - Bend and elbow: for each revolute joint after the first, at each
+      target configuration, the distance to the nearest bend cluster.
+      Also the distance to the nearest bend of the segment paths of that
+      target.
+    - Bound consistency with Stage 3.
     """
     design, Q = mechanism["design"], mechanism["Q"]
     combo = design["joint_types"]
@@ -675,8 +667,8 @@ def validate_mechanism(problem, mechanism, ctx):
         "bound_consistency": {
             "total_length_with_probe": tl,
             "length_bound": b["length"]["bound"],
-            # the grid bound carries fast-marching error (~0.2% on one_obstacle,
-            # above the analytic tangent-arc-tangent length), so allow two cells
+            # the grid bound has fast-marching error (approximately 0.2% above
+            # the tangent-arc-tangent length on one_obstacle), so allow two cells
             "length_grid_tol": 2.0 / problem.grid_resolution,
             "length_margin": None if b["length"]["bound"] is None else tl - b["length"]["bound"],
             "length_ok": bool(b["length"]["bound"] is None

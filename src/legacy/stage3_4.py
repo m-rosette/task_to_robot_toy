@@ -9,7 +9,7 @@ velocity (xdot, ydot, thetadot) on SE(2). Generator fields are therefore
 plain vector fields in (x, y, theta) coordinates, and their Lie bracket is
 the coordinate bracket, with no se(2) commutator term (see
 `_vector_field_bracket`). All comparisons between twists use the
-unit-consistent metric from `problem.twist_metric`.
+unit-consistent metric from `problem.to_dimensionless`.
 """
 
 import numpy as np
@@ -393,18 +393,18 @@ def _cluster_revolute_axes(revolute_records, k_max=4, n_iter=50, seed=0, length_
         assign = np.zeros(len(axes), dtype=int)
         centers_axes = axes.mean(axis=0, keepdims=True)
     else:
-        best_k, best_score, best_assign, best_centers = 1, -np.inf, np.zeros(len(axes), dtype=int), axes.mean(axis=0, keepdims=True)
+        best_score, best_assign, best_centers = -np.inf, np.zeros(len(axes), dtype=int), axes.mean(axis=0, keepdims=True)
         for k in range(2, k_max + 1):
             centers, assign = _kmeans_pp(axes, k, n_iter=n_iter, seed=seed)
             if len(set(assign.tolist())) < 2:
                 continue
             score = _silhouette_score(axes, assign)
             if score > best_score:
-                best_score, best_k, best_assign, best_centers = score, k, assign, centers
+                best_score, best_assign, best_centers = score, assign, centers
         # only accept multi-cluster structure if it's a clearly better fit
         # than treating all axes as one joint
         if best_score < 0.5:
-            best_k, best_assign, best_centers = 1, np.zeros(len(axes), dtype=int), axes.mean(axis=0, keepdims=True)
+            best_assign, best_centers = np.zeros(len(axes), dtype=int), axes.mean(axis=0, keepdims=True)
         assign, centers_axes = best_assign, best_centers
 
     clusters = []

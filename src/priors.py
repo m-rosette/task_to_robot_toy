@@ -1,34 +1,37 @@
 """
 Stage 4b: Priors from reach paths.
 
-Each reach path (Stage 2) is simplified into a *segment path*: a polyline
-of straight segments that stays in free space. Its bend points are
-joint-location priors and its segment lengths are link-length priors.
+Stage 4b simplifies each reach path (Stage 2) into a segment path: a
+polyline of straight segments in free space. Its bend points are
+joint-location priors. Its segment lengths are link-length priors.
 
-Simplification is a constrained Douglas-Peucker pass (a shortcut is
-accepted only if it stays within `eps` of the reach path *and* its straight
-segment clears every obstacle by `link_radius`), followed by removing any
-bend whose two neighbors already see each other. The result is a valid
-collision-free polyline, so its segment count is an upper estimate of the
-minimum-link count m_k from Stage 3.
+The simplification is a constrained Douglas-Peucker pass, then the removal
+of each bend whose two neighbors see each other. The pass accepts a shortcut
+only if the shortcut stays within `eps` of the reach path and clears all
+obstacles by `link_radius`. The result is a collision-free polyline. Thus
+its segment count is an upper estimate of the minimum-link count m_k from
+Stage 3.
 
-Bend points are pooled across targets (and tied routes) and clustered with
-k-means++ and a silhouette test (moved here from `legacy/stage3_4.py`);
-cluster dispersion says how much the targets agree on where to bend.
+Stage 4b pools the bend points of all targets and tied routes. It clusters
+them with scikit-learn k-means++ and the silhouette score. The cluster
+dispersion shows how much the targets agree on the bend locations.
 
-`design_prior` turns segment paths into a starting design and per-target
-starting configurations for any joint combination, and `approach_cones`
-records, for each target, the headings inside its pruned band from which
-the last link plus probe can come in without collision.
+`design_prior` makes a start design and per-target start configurations for
+a joint combination from the segment paths. `approach_cones` gives, for each
+target, the headings in its pruned band at which the last link and the probe
+are clear of obstacles.
 """
 
 import numpy as np
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
 
 from problem import wrap_angle
+from targets import intervals_of
 
 
 DP_EPS = 0.25          # Douglas-Peucker deviation tolerance (length units)
-BEND_CLUSTER_RADIUS_FRAC = 0.05  # max bend-cluster dispersion, as a fraction of length_scale
+BEND_CLUSTER_RADIUS_FRAC = 0.05  # maximum bend-cluster dispersion, as a fraction of length_scale
 MIN_LENGTH = 0.05
 
 
@@ -71,7 +74,7 @@ def remove_redundant_bends(vertices, problem, infl=None):
     changed = True
     while changed and len(V) > 2:
         changed = False
-        # drop the bend with the smallest turn whose neighbors see each other
+        # remove the bend with the smallest turn whose neighbors see each other
         order = sorted(range(1, len(V) - 1), key=lambda i: abs(_turn(V[i - 1], V[i], V[i + 1])))
         for i in order:
             if _clear(problem, V[i - 1], V[i + 1], infl):
@@ -91,8 +94,8 @@ def segment_path(points, problem, eps=DP_EPS):
 
 
 def _approximate(V, g):
-    """Polyline with exactly g segments: drop the gentlest bends, or split
-    the longest segment, until the count matches."""
+    """Polyline with exactly g segments. It removes the smallest bends, or
+    divides the longest segment, until the count is g."""
     V = [np.asarray(v, float) for v in V]
     while len(V) - 1 > g:
         i = min(range(1, len(V) - 1), key=lambda i: abs(_turn(V[i - 1], V[i], V[i + 1])))
@@ -105,78 +108,32 @@ def _approximate(V, g):
 
 
 # --------------------------------------------------------------------------
-# Clustering (from legacy/stage3_4.py)
+# Clustering
 # --------------------------------------------------------------------------
 
-def _kmeans_pp(points, k, n_iter=50, seed=0):
-    rng = np.random.default_rng(seed)
-    n = len(points)
-    centers = np.zeros((k, points.shape[1]))
-    centers[0] = points[rng.integers(n)]
-    for c in range(1, k):
-        d2 = np.min(np.sum((points[:, None, :] - centers[None, :c, :]) ** 2, axis=2), axis=1)
-        probs = d2 / (d2.sum() + 1e-12)
-        centers[c] = points[rng.choice(n, p=probs)]
-    assign = np.zeros(n, dtype=int)
-    for _ in range(n_iter):
-        d = np.linalg.norm(points[:, None, :] - centers[None, :, :], axis=2)
-        new_assign = np.argmin(d, axis=1)
-        new_centers = np.array([
-            points[new_assign == c].mean(axis=0) if np.any(new_assign == c) else centers[c]
-            for c in range(k)
-        ])
-        if np.array_equal(new_assign, assign) and np.allclose(new_centers, centers):
-            assign = new_assign
-            centers = new_centers
-            break
-        assign, centers = new_assign, new_centers
-    return centers, assign
-
-
-def _silhouette_score(points, assign):
-    """Mean silhouette coefficient (numpy-only, no sklearn dependency).
-    Members of singleton clusters score 0 (the standard convention; the
-    legacy copy scored them 1, which always favored k = number of points)."""
-    n = len(points)
-    d = np.linalg.norm(points[:, None, :] - points[None, :, :], axis=2)
-    labels = np.unique(assign)
-    scores = np.zeros(n)
-    for i in range(n):
-        own = assign[i]
-        same = (assign == own)
-        same[i] = False
-        if not same.any():
-            continue
-        a = d[i, same].mean()
-        b = np.inf
-        for lab in labels:
-            if lab == own:
-                continue
-            other = assign == lab
-            if other.any():
-                b = min(b, d[i, other].mean())
-        scores[i] = 0.0 if max(a, b) == 0 else (b - a) / max(a, b)
-    return float(scores.mean())
-
-
 def cluster_bends(points, radius, k_max=6, seed=0):
-    """Cluster 2D bend points with k-means++. The cluster count is the
-    smallest k whose clusters all have dispersion <= `radius` (bends on
-    opposite sides of an obstacle must not be averaged into its center);
-    if no k up to `k_max` achieves that, the k with the best silhouette.
-    Returns a list of {center, dispersion, n_members, members}."""
+    """Clusters 2D bend points with k-means++. The cluster count is the
+    smallest k at which the dispersion of each cluster is at most
+    `radius`. Thus bends on opposite sides of an obstacle do not merge
+    into its center. If no k up to `k_max` meets this condition, the
+    cluster count is the k with the best silhouette. Members of singleton
+    clusters score 0. Returns a list of {center, dispersion, n_members,
+    members}."""
     points = np.asarray(points, float).reshape(-1, 2)
     if len(points) == 0:
         return []
     chosen, best = None, (-np.inf, None, None)
-    for k in range(1, min(k_max, len(points)) + 1):
-        c, a = _kmeans_pp(points, k, seed=seed)
+    for k in range(1, min(k_max, len(np.unique(points, axis=0))) + 1):
+        km = KMeans(n_clusters=k, init="k-means++", random_state=seed).fit(points)
+        c, a = km.cluster_centers_, km.labels_
         disp = max(np.mean(np.linalg.norm(points[a == j] - c[j], axis=1)) for j in set(a.tolist()))
         if disp <= radius:
             chosen = (c, a)
             break
-        if k >= 2 and len(set(a.tolist())) >= 2:
-            s = _silhouette_score(points, a)
+        n_labels = len(set(a.tolist()))
+        if k >= 2 and n_labels >= 2:
+            # silhouette_score needs a non-singleton cluster. All singletons score 0.
+            s = silhouette_score(points, a) if n_labels < len(points) else 0.0
             if s > best[0]:
                 best = (s, c, a)
     if chosen is None:
@@ -199,9 +156,9 @@ def cluster_bends(points, radius, k_max=6, seed=0):
 # --------------------------------------------------------------------------
 
 def approach_cones(problem, target_sets, nominal_last=None):
-    """Headings in each pruned band from which the last link (nominal length
-    `nominal_last[k]`) plus probe clears every obstacle by the planning
-    inflation. Returns per target a list of (lo, hi) intervals."""
+    """Headings in each pruned band at which the last link (nominal length
+    `nominal_last[k]`) and the probe clear all obstacles by the planning
+    inflation. Returns a list of (lo, hi) intervals for each target."""
     out = []
     for i, ts in enumerate(target_sets):
         if not ts["feasible"]:
@@ -211,20 +168,12 @@ def approach_cones(problem, target_sets, nominal_last=None):
         hs = ts["samples"][ts["keep"]]
         u = np.stack([np.cos(hs), np.sin(hs)], axis=-1)
         ok = problem.segment_clearance(ts["xy"][None, :] - Ln * u, ts["xy"][None, :]) > problem.inflation
-        runs, start = [], None
-        for j, k in enumerate(ok):
-            if k and start is None:
-                start = j
-            if (not k or j == len(ok) - 1) and start is not None:
-                end = j if k else j - 1
-                runs.append((float(hs[start]), float(hs[end])))
-                start = None
-        out.append(runs)
+        out.append(intervals_of(hs, ok))
     return out
 
 
 def build_priors(problem, target_sets, field, seed=0):
-    """Stage 4b: segment paths for every reach path, pooled bend clusters,
+    """Stage 4b: segment paths for each reach path, pooled bend clusters,
     and approach cones."""
     per_target = []
     bends = []
@@ -256,8 +205,8 @@ def build_priors(problem, target_sets, field, seed=0):
 
 
 def chain_groups(combo):
-    """Split a joint combination into straight chain segments: a new segment
-    starts at every revolute joint after the first joint."""
+    """Divides a joint combination into straight chain segments. A new
+    segment starts at each revolute joint after the first joint."""
     groups = [[0]]
     for i in range(1, len(combo)):
         if combo[i] == "R":
@@ -268,9 +217,9 @@ def chain_groups(combo):
 
 
 def design_prior(problem, combo, priors, target_sets):
-    """Starting design and per-target starting configurations for `combo`
-    from the segment paths. Returns (design dict, list of dof0 per target,
-    with P joints as stroke fractions in [0, 1])."""
+    """Start design and per-target start configurations for `combo` from the
+    segment paths. Returns (design dict, list of dof0 for each target). P
+    joints use stroke fractions in [0, 1]."""
     groups = chain_groups(combo)
     g = len(groups)
     approx = []

@@ -1,20 +1,18 @@
 """
 E5: Ablations.
 
-Varies one setting at a time around a preset and records the bounds, the
-admissible set, and the Stage 5 selection over a few seeds, to show whether
-they are stable across reasonable settings:
+Changes one setting at a time around a preset. For each value, records the
+bounds, the admissible set, and the Stage 5 selection over a few seeds:
 
 - grid resolution (geodesic field and minimum-link grid)
-- obstacle inflation (clearance margin on top of the link radius)
+- obstacle inflation (`clearance_margin` added to `link_radius`)
 - heading tolerance width
 - probe length
-- characteristic length (enters conditioning and the position tolerance)
-- orientation rule (blend radius of the dead-band heading rule; only the
-  heading field changes, since nothing downstream consumes it)
+- characteristic length (conditioning and position tolerance)
+- orientation rule (blend radius of the dead-band heading rule). Only the
+  heading field changes, because no later stage uses it.
 
-The legacy-field ablation is a runner flag:
-`run_geodesic_pipeline.py --field potential`.
+`run_geodesic_pipeline.py --field potential` runs the legacy-field ablation.
 
 Usage (from src/):
     ../.venv/bin/python experiments/ablations.py [--problem one_obstacle] [--seeds 3] [--jobs J]

@@ -4,15 +4,15 @@ minimal Lie algebra -> synthesize mechanism" pipeline.
 
 Everything lives in SE(2): a planar end-effector pose is (x, y, theta).
 
-The geodesic, reach-only pipeline (`run_geodesic_pipeline.py`) reads the
-multi-target fields (`targets`, `targets_list`) and the fixed physical
-parameters (`base_angle`, `probe_length`, `link_radius`, `clearance_margin`,
-`grid_resolution`); the legacy pipeline (`legacy/`, `run_pipeline.py`) reads
-only the single-target fields, which stay the default.
+`run_geodesic_pipeline.py` reads the multi-target fields (`targets`,
+`targets_list`) and the physical parameters (`base_angle`, `probe_length`,
+`link_radius`, `clearance_margin`, `grid_resolution`). `run_pipeline.py`
+(`legacy/`) reads only the single-target fields. The single-target fields
+are the default.
 """
 
 import numpy as np
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -39,40 +39,40 @@ class ToyProblem:
     # Characteristic length used to make twists unit-consistent: a twist
     # (v, omega) mixes length/time with 1/time, so every norm, cosine,
     # orthogonalization, and threshold on twists uses the metric
-    # ||xi||^2 = |v|^2 / L^2 + omega^2 (see `twist_metric`). None -> the
+    # ||xi||^2 = |v|^2 / L^2 + omega^2 (see `to_dimensionless`). None -> the
     # base-to-target distance, i.e. the reach the task demands.
     char_length: float = None
 
-    # Multi-target task: tuple of (x, y, theta, theta_tol). None -> the single
-    # target above, so existing presets and the legacy pipeline are unchanged.
+    # Multi-target task: tuple of (x, y, theta, theta_tol). None -> the
+    # single target above.
     targets: tuple = None
 
-    # Fixed reference direction at the mount (not a design variable). A chain
-    # whose first joint is revolute absorbs it into that joint's angle; a
-    # chain whose first joint is prismatic ignores it and uses its fitted
-    # `slide_angle` instead.
+    # Fixed reference heading at the mount (not a design variable). With a
+    # revolute first joint, the first link heading is base_angle + q[0].
+    # A prismatic first joint uses its fitted `slide_angle` instead.
     base_angle: float = 0.0
 
-    # Fixed tool segment appended along the last link. The end-effector point
-    # is the probe tip and its heading is the last link's direction. The
-    # probe is also the segment used to prune each target's heading band.
+    # Fixed tool segment along the last link. The end-effector point is the
+    # probe tip. The end-effector heading is the last link direction. Stage 1
+    # uses the probe to prune the heading band of each target.
     probe_length: float = 0.5
 
-    # Physical half-width of every link (and the probe): a body segment
-    # collides when it comes within `link_radius` of an obstacle.
+    # Half-width of each link and of the probe. A body segment collides when
+    # its clearance from an obstacle is less than `link_radius`.
     link_radius: float = 0.1
 
-    # Extra inflation on top of `link_radius` for planning (geodesic field,
-    # bounds, tolerance pruning, and the collision term while fitting).
+    # Inflation added to `link_radius` for planning: the geodesic field,
+    # tolerance pruning, approach cones, and the collision residual of the fit.
     clearance_margin: float = 0.05
 
-    # Cells per unit length for the geodesic field and the minimum-link grid.
+    # Cells per unit length of the geodesic field grid. The minimum-link grid
+    # uses half this value.
     grid_resolution: float = 20.0
 
     @property
     def targets_list(self):
-        """Targets as a list of (x, y, theta, theta_tol), whichever way the
-        problem was specified."""
+        """Targets as a list of (x, y, theta, theta_tol), from `targets` or
+        from the single-target fields."""
         if self.targets is None:
             return [(float(self.target[0]), float(self.target[1]),
                      float(self.target_theta), float(self.target_theta_tol))]
@@ -80,22 +80,17 @@ class ToyProblem:
 
     @property
     def inflation(self):
-        """Obstacle inflation used for planning: link radius + margin."""
+        """Planning obstacle inflation: `link_radius` + `clearance_margin`."""
         return float(self.link_radius + self.clearance_margin)
 
     @property
     def length_scale(self):
-        """Characteristic length: `char_length` if set, else the farthest
-        base-to-target distance (the reach the task demands)."""
+        """Characteristic length: `char_length` if set, else the largest
+        base-to-target distance."""
         if self.char_length is not None:
             return float(self.char_length)
         return float(max(np.hypot(x - self.base[0], y - self.base[1])
                          for x, y, _, _ in self.targets_list))
-
-    def in_bounds(self, xy):
-        xmin, ymin, xmax, ymax = self.bounds
-        x, y = xy
-        return xmin <= x <= xmax and ymin <= y <= ymax
 
     def obstacle_clearance(self, xy):
         """Signed distance to the nearest obstacle's surface; negative =
@@ -114,10 +109,10 @@ class ToyProblem:
         return out
 
     def segment_clearance(self, a, b):
-        """Exact signed clearance of straight segment(s) a -> b (arrays
-        (..., 2), broadcast against each other) from the circular
-        obstacles: distance from each obstacle center to the closest point
-        on the segment, minus the radius, minimized over obstacles."""
+        """Signed clearance of straight segments a -> b from the circular
+        obstacles. `a` and `b` are arrays (..., 2) that broadcast. The
+        clearance is the minimum, over the obstacles, of the
+        center-to-segment distance minus the radius."""
         a = np.asarray(a, dtype=float)
         b = np.asarray(b, dtype=float)
         a, b = np.broadcast_arrays(a, b)
@@ -134,13 +129,11 @@ class ToyProblem:
 
 TWO_OBSTACLES = dict(obstacles=((5.0, 5.2, 1.4), (7.0, 3.0, 1.0)))
 
-# Targets on an arc around the far (lower-right) side of the single
-# obstacle, two of them behind it and one close beside it. Headings follow the direction in which a
-# collision-free path around that side arrives. The arc stays on one side
-# because transitions are straight lines in joint space: an arm anchored at
-# the base cannot swing its links across the obstacle between targets on
-# opposite sides without a retracting via-configuration, which the toy does
-# not model.
+# Targets on an arc on the lower-right side of the single obstacle. Two
+# targets are behind the obstacle and one is near it. Each heading is the
+# arrival direction of a collision-free path on that side. All targets are on
+# one side because transitions are straight lines in joint space. The toy has
+# no via-configurations, so an arm cannot move its links across the obstacle.
 _RING_TARGETS = (
     (8.5, 8.0, 60.0),
     (7.0, 7.0, 75.0),
@@ -149,7 +142,7 @@ _RING_TARGETS = (
     (8.5, 5.0, 30.0),
     (7.5, 3.8, 20.0),
     (8.0, 2.5, 5.0),
-    (6.4, 5.6, 65.0),   # close to the obstacle: part of its band is pruned
+    (6.4, 5.6, 65.0),   # near the obstacle: Stage 1 removes part of its band
 )
 
 
@@ -158,14 +151,12 @@ def _ring(tol_deg, n=None):
 
 
 MULTI_TARGET_WIDE = dict(targets=_ring(40.0))
-# Exact headings on the first seven ring targets. The eighth exists to show
-# partial band pruning, which an exact heading cannot (it is kept or not),
-# and with its heading fixed no chain of up to three joints reaches all
-# eight targets collision-free.
+# Exact headings on the first seven ring targets. With an exact heading on
+# all eight targets, no chain of up to three joints is collision-free.
 MULTI_TARGET_EXACT = dict(targets=_ring(0.0, n=7))
 
-# Parallel-branch gantry analogue: every target is approached along the
-# same heading (+y), and nothing obstructs the straight reach from the base.
+# Parallel-branch gantry analogue: all targets have the same heading (+y),
+# and no obstacle blocks the straight line from the base.
 PARALLEL_BRANCHES = dict(
     obstacles=(),
     targets=tuple((x, y, np.deg2rad(90.0), np.deg2rad(10.0))
@@ -180,7 +171,7 @@ PRESETS = {
     "two_obstacles": TWO_OBSTACLES,
 }
 
-# Presets the legacy single-target pipeline (`run_pipeline.py`) supports.
+# Presets that `run_pipeline.py` (single target) supports.
 LEGACY_PRESETS = {k: PRESETS[k] for k in ("one_obstacle", "two_obstacles")}
 
 
@@ -194,11 +185,6 @@ LEGACY_PRESETS = {k: PRESETS[k] for k in ("one_obstacle", "two_obstacles")}
 # coordinates. Their Euclidean norm depends on the length unit (meters vs.
 # millimeters changes which component dominates), so every comparison
 # between twists goes through this diagonal metric instead.
-
-def twist_metric(L):
-    """Diagonal weights W with ||xi||_W^2 = xi^T W xi = |v|^2/L^2 + omega^2."""
-    return np.array([1.0 / L ** 2, 1.0 / L ** 2, 1.0])
-
 
 def to_dimensionless(xi, L):
     """Map hybrid twist(s) (..., 3) to dimensionless form (v/L, omega), in
@@ -237,63 +223,8 @@ def span_residual(basis, xi, L):
 
 
 # --------------------------------------------------------------------------
-# SE(2) helpers
+# Angles
 # --------------------------------------------------------------------------
 
 def wrap_angle(a):
     return (a + np.pi) % (2 * np.pi) - np.pi
-
-
-def se2_log(dtheta, dx, dy):
-    """Closed-form log map of SE(2): relative transform (dtheta,dx,dy)
-    expressed in the *body* frame -> body twist (vx, vy, omega)."""
-    if abs(dtheta) < 1e-8:
-        vx, vy = dx, dy
-    else:
-        A = np.sin(dtheta) / dtheta
-        B = (1 - np.cos(dtheta)) / dtheta
-        det = A * A + B * B
-        vx = (A * dx + B * dy) / det
-        vy = (-B * dx + A * dy) / det
-    return np.array([vx, vy, dtheta])
-
-
-def relative_body_twist(pose1, pose2, dt):
-    """Body-frame twist that carries pose1 -> pose2 in time dt, computed via
-    the SE(2) logarithm of T1^{-1} T2 (this is the 'Lie group logarithm'
-    finite-difference twist estimator referenced in Stage 1)."""
-    x1, y1, th1 = pose1
-    x2, y2, th2 = pose2
-    dx_w, dy_w = x2 - x1, y2 - y1
-    c, s = np.cos(th1), np.sin(th1)
-    dx = c * dx_w + s * dy_w
-    dy = -s * dx_w + c * dy_w
-    dtheta = wrap_angle(th2 - th1)
-    twist = se2_log(dtheta, dx, dy)
-    return twist / dt
-
-
-def se2_bracket(xi1, xi2):
-    """Lie bracket in se(2) of *spatial* (or body) twists, i.e. of the
-    corresponding right- (left-) invariant vector fields. Elements are
-    (vx, vy, omega).
-
-    NOT valid for the hybrid twists used elsewhere in this pipeline (EE-point
-    velocity + omega): those are coordinate velocities, and two constant
-    hybrid fields -- e.g. "translate along x" and "spin about the EE point"
-    -- have commuting flows although this formula returns a nonzero value
-    for them. Stage 3 therefore uses the coordinate bracket
-    (`stage3_4._vector_field_bracket`); this function is kept as a correct
-    utility for spatial twists only.
-
-    se(2) = so(2) (+) R^2 (semidirect product), so(2) acts on R^2 by the
-    90-degree rotation J = [[0,-1],[1,0]]. Result:
-        [xi1, xi2] = (omega1 * J v2 - omega2 * J v1, 0)
-    i.e. translations commute with each other; rotation and translation
-    generally do not commute.
-    """
-    v1 = np.array(xi1[:2]); w1 = xi1[2]
-    v2 = np.array(xi2[:2]); w2 = xi2[2]
-    J = np.array([[0.0, -1.0], [1.0, 0.0]])
-    v_out = w1 * (J @ v2) - w2 * (J @ v1)
-    return np.array([v_out[0], v_out[1], 0.0])

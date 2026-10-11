@@ -1,18 +1,18 @@
 """
-Runs the geodesic, reach-only pipeline (Stages 1-6) and writes figures to
-../images/geodesic/<run>/ and JSON reports to ../reports/geodesic/<run>/,
-where <run> is the problem name, suffixed with the start mode and field
-when they differ from the defaults (priors, geodesic).
+Runs the geodesic, reach-only pipeline (Stages 1-6). Writes figures to
+../images/geodesic/<run>/ and JSON reports to ../reports/geodesic/<run>/.
+<run> is the problem name, with the start mode and the field as suffixes
+when they are not the defaults (priors, geodesic).
 
 Usage:
     python run_geodesic_pipeline.py [--problem NAME] [--seeds N] [--jobs J]
                                     [--starts priors|random|legacy_icr]
                                     [--field geodesic|potential]
 
-Stage 5 runs once per seed in parallel; seeds change the starting points
-(and IK restarts), not the task. The mechanism that is validated and
-plotted is the lowest-score feasible design at the most frequently selected
-joint count. The legacy bracket-based pipeline is `run_pipeline.py`.
+Stage 5 runs once for each seed, in parallel. The seeds change the start
+points and the IK restarts, not the task. The runner validates and plots the
+lowest-score feasible design at the most frequent selected joint count.
+`run_pipeline.py` runs the legacy bracket-based pipeline.
 """
 
 import argparse
@@ -41,7 +41,7 @@ from stage5_6 import (build_context, search_mechanism, validate_mechanism, desig
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Categorical slots in fixed order (dataviz reference palette, light mode).
+# Categorical colors in fixed order (dataviz reference palette, light mode).
 SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"]
 INK, INK_2, MUTED, OBST = "#1f1f1e", "#5f5e5a", "#a3a29c", "#d9d8d2"
 
@@ -117,7 +117,7 @@ def plot_targets(problem, target_sets, path):
     for ts in target_sets:
         x, y = ts["xy"]
         lo, hi = np.rad2deg(ts["band"])
-        # wedges point back along the probe (the arm comes in from there)
+        # wedges point back along the probe, toward the arm
         ax.add_patch(Wedge((x, y), R, lo + 180, hi + 180, color=OBST, alpha=0.8, zorder=2))
         for a, b in ts["intervals"]:
             ax.add_patch(Wedge((x, y), R, np.rad2deg(a) + 180, np.rad2deg(b) + 180,
@@ -187,7 +187,6 @@ def plot_segment_paths(problem, field, priors, target_sets, path):
 
 def plot_bounds(problem, bounds, target_sets, path):
     info = bounds["_link_info"]
-    grid = info["grid"]
     lv = np.where(info["free"], info["level_map"], -1).astype(float)
     lv[lv < 0] = np.nan
     lv[lv == 0] = np.nan
@@ -245,8 +244,8 @@ def plot_mechanism(problem, mech, ctx, validation, path):
 
 
 def plot_starts_comparison(report_paths, path, problem_name):
-    """Evaluations to the first feasible design, per seed, for every start
-    mode with a report for this problem and field (`report_paths`)."""
+    """Evaluations to the first feasible design, for each seed and each
+    start mode with a report for this problem and field (`report_paths`)."""
     rows = {}
     for rp in report_paths:
         with open(rp) as f:
@@ -296,8 +295,8 @@ def _sibling_reports(problem_name, field_mode):
 # --------------------------------------------------------------------------
 
 def legacy_icr_clusters(problem, target_sets):
-    """ICR clusters of the legacy field toward the first target, for the
-    `legacy_icr` starting points."""
+    """ICR clusters of the legacy field to the first feasible target, for
+    the `legacy_icr` start points."""
     from legacy.stage1_2 import build_exact_generators
     from legacy.stage3_4 import analyze_lie_algebra, classify_primitives
     t = next(ts for ts in target_sets if ts["feasible"])

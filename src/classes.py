@@ -1,7 +1,7 @@
 """
 Stage 4a: Motion-class restriction.
 
-Motion classes in SE(2), anchored at the fixed base (`fk` places the first
+Motion classes in SE(2), anchored at the fixed base (`fk` puts the first
 joint there), from smallest to largest:
 
 | Class              | Coset test over all targets                                   | Joint combinations |
@@ -11,24 +11,23 @@ joint there), from smallest to largest:
 | planar_translation | one common heading inside every pruned band                  | P, PP, PPP         |
 | se2                | none of the above                                             | any with an R      |
 
-A joint combination is admissible when it belongs to the chosen class, has
-at least the counting bound's number of joints, and has at least the
-rotating-joint floor's number of revolute joints after its first joint.
-The *smallest covering class* is the smallest class whose coset test covers
-every target; the *selected class* is the first class, from the smallest
-covering one upward, whose admissible list is nonempty. (For a single
-target every class covers it, and the obstacle's rotating-joint floor then
-empties the three smaller classes, which is how `one_obstacle` lands in
-SE(2) with 8 of 14 combinations.)
+A joint combination is admissible when all of these conditions are true:
 
-Note on realizability: with straight links and no fixed bends, every
-prismatic joint after the first slides along the same line as the first,
-so a prismatic-only chain reaches a ray from the base with its heading
-along that ray. Prismatic-only combinations therefore realize
-line_translation with heading = bearing, never planar translation. The
-class test reports that planar translation *covers* a common-heading task;
-the search (`stage5_6.search_mechanism`) then escalates to the next class
-when no admissible combination of the selected class is feasible.
+- It is in the class.
+- Its joint count is at least the counting bound.
+- Its number of revolute joints after the first joint is at least the
+  rotating-joint floor.
+
+The smallest covering class is the smallest class whose coset test covers
+all targets. The selected class is the first class, from the smallest
+covering class upward, with a nonempty admissible list.
+
+With straight links and no fixed bends, a prismatic-only chain moves along
+one ray from the base, and its heading is along that ray. Thus a
+prismatic-only combination realizes line_translation with heading = bearing,
+and never planar_translation. When no admissible combination of the selected
+class is feasible, `stage5_6.search_mechanism` continues with the next
+covering class.
 """
 
 import itertools
@@ -42,8 +41,7 @@ from targets import SAMPLE_STEP, heading_residual
 N_MAX = 3
 ALL_COMBINATIONS = ["".join(p) for n in range(1, N_MAX + 1) for p in itertools.product("RP", repeat=n)]
 CLASS_ORDER = ("line_translation", "rotation", "planar_translation", "se2")
-CLASS_DIM = {"line_translation": 1, "rotation": 1, "planar_translation": 2, "se2": 3}
-COSET_POS_TOL_FRAC = 0.01  # position tolerance of the coset tests, as a fraction of length_scale
+COSET_POS_TOL_FRAC = 0.01  # coset-test position tolerance, as a fraction of length_scale
 
 
 def class_combinations(name):
@@ -73,8 +71,8 @@ def _heading_grid():
 
 
 def _max_common(interval_lists, offsets=None):
-    """Largest number of interval lists containing one common angle, and
-    that angle. `offsets` shifts each list (used for heading - bearing)."""
+    """Largest number of interval lists that contain one common angle, and
+    that angle. `offsets` shifts each list (for heading - bearing)."""
     grid = _heading_grid()
     best, best_h = 0, None
     for h in grid:
@@ -94,8 +92,9 @@ def _coverage_planar(feas):
 
 
 def _coverage_line(feas, base, tol):
-    """Greedy over the line direction: try each target's bearing (and the
-    principal direction of all of them) as the line through the base."""
+    """Greedy search over the line direction. Each target bearing, and the
+    principal direction of all targets, is a candidate line through the
+    base."""
     rel = np.array([ts["xy"] - base for ts in feas])
     dirs = [np.arctan2(r[1], r[0]) for r in rel]
     M = rel.T @ rel
@@ -116,9 +115,10 @@ def _coverage_line(feas, base, tol):
 
 
 def _coverage_rotation(feas, base, tol):
-    """Greedy over the common offset delta = heading - bearing: for each
-    delta, the targets whose band contains bearing + delta, then the largest
-    group of those with a common radius (within `tol`)."""
+    """Greedy search over the common offset delta = heading - bearing. For
+    each delta, it finds the targets whose band contains bearing + delta.
+    Then it finds the largest group of these targets with a common radius
+    (within `tol`)."""
     rel = np.array([ts["xy"] - base for ts in feas])
     bearings = np.arctan2(rel[:, 1], rel[:, 0])
     radii = np.linalg.norm(rel, axis=1)
@@ -142,8 +142,9 @@ def _coverage_rotation(feas, base, tol):
 
 def classify_task(problem, target_sets, bounds):
     """Stage 4a: class coverage, the smallest covering class, the selected
-    class, its admissible combinations, rho, and the escalation order the
-    search follows if the selected class has no feasible design."""
+    class, its admissible combinations, rho, and the escalation order.
+    The search uses the escalation order if the selected class has no
+    feasible design."""
     feas = [ts for ts in target_sets if ts["feasible"]]
     K = len(feas)
     base = np.asarray(problem.base, float)

@@ -2,49 +2,45 @@
 Stage 2: Geodesic twist field.
 
 For each target k, the translational part of the field is the negative
-gradient of the geodesic (shortest collision-free path) distance d_k to the
-target, solved on an occupancy grid whose obstacles are inflated by
-`link_radius + clearance_margin`. Unlike the legacy attractor/repeller/swirl
-field (`legacy/field.py`), it has no local minima, needs no per-obstacle
-circulation sign, and its streamline from the base mount -- the *reach
-path* -- is the shortest collision-free path to the target.
+gradient of the geodesic distance d_k to the target. d_k is the length of
+the shortest collision-free path. Stage 2 calculates d_k on an occupancy
+grid with obstacles inflated by `link_radius + clearance_margin`. The field
+has no local minima. Its streamline from the base mount is the reach path,
+which is the shortest collision-free path to the target.
 
-The orientation part reuses the legacy dead-band rule
-(`legacy.field.desired_heading`) with geodesic distance in place of
-Euclidean distance: the heading follows the direction of travel, and within
-`blend_radius` of the target (measured along the free path) it rotates
-toward the nearest edge of the target's pruned heading band, only as far as
-needed to enter it. This is a design choice, not something the distance
-field implies.
+The orientation part is a dead-band rule on the geodesic distance. The
+heading follows the direction of travel. Within `blend_radius` of the target
+(along the free path), the heading turns toward the nearest edge of the
+pruned heading band. A smoothstep weight on the distance sets the turn. At
+the target, the heading is on the band edge. If the direction of travel is
+in the band, the heading does not turn.
 
-Distances come from fast marching (`scikit-fmm`) when it is installed, else
-from `skimage.graph.MCP_Geometric`, which is less accurate on diagonals.
-Obstacles in this toy are circles, so occupancy is computed from exact
-clearance at each cell center rather than from a distance transform.
+Fast marching (`scikit-fmm`) calculates the distances. The obstacles are
+circles, so the occupancy comes from the exact clearance at each cell
+center.
 
-`field_mode="potential"` keeps the distance field (the bounds need it) but
-replaces the field direction, heading rule, and reach paths with the legacy
-potential field, for ablation.
+`field_mode="potential"` keeps the distance field and `geodesic_length`. It
+replaces the field direction, the heading rule, and the reach paths with the
+legacy potential field.
 """
 
 import dataclasses
 import itertools
 
 import numpy as np
+import skfmm
+from scipy import ndimage
+from scipy.spatial.distance import directed_hausdorff
 
-from problem import twist_normalize, wrap_angle
+from problem import wrap_angle
 from targets import heading_residual
 
-try:
-    import skfmm
-    DISTANCE_BACKEND = "scikit-fmm"
-except ImportError:  # pragma: no cover - exercised only without scikit-fmm
-    skfmm = None
-    DISTANCE_BACKEND = "skimage-MCP_Geometric"
+
+DISTANCE_BACKEND = "scikit-fmm"
 
 
-ROUTE_TIE_TOL = 0.05   # alternative routes within this fraction of the shortest are kept
-ROUTE_DISTINCT = 0.5   # two reach paths are distinct if their Hausdorff distance exceeds this
+ROUTE_TIE_TOL = 0.05   # keep a tied route if its length is within this fraction of the shortest
+ROUTE_DISTINCT = 0.5   # two reach paths are distinct if their Hausdorff distance is more than this
 
 
 # --------------------------------------------------------------------------
@@ -52,7 +48,7 @@ ROUTE_DISTINCT = 0.5   # two reach paths are distinct if their Hausdorff distanc
 # --------------------------------------------------------------------------
 
 def make_grid(problem, resolution=None):
-    """Cell-centered grid over the workspace. Arrays are indexed [iy, ix]."""
+    """Cell-centered grid over the workspace. Arrays use [iy, ix] indices."""
     res = float(resolution or problem.grid_resolution)
     xmin, ymin, xmax, ymax = problem.bounds
     nx = int(round((xmax - xmin) * res))
@@ -75,7 +71,7 @@ def cell_of(grid, xy):
 
 
 def _segment_mask(grid, a, b, half_width):
-    """Cells whose centers lie within `half_width` of segment a -> b."""
+    """Cells with centers within `half_width` of segment a -> b."""
     a, b = np.asarray(a, float), np.asarray(b, float)
     d = b - a
     P = grid["centers"]
@@ -96,23 +92,41 @@ def _ray_to_boundary(bounds, p, u):
     return p + s * u
 
 
+def make_interpolator(field, grid):
+    """Bilinear interpolator of `field` that ignores non-finite cells.
+    `field` is [iy, ix], or [iy, ix, m] for m components with one shared
+    mask. The interpolator divides the interpolated zero-filled field by
+    the interpolated finite mask. Thus the weight of a non-finite corner
+    goes to the finite corners. Points outside the cell centers are
+    clamped. The returned function takes xy (2,) or (N, 2) and returns
+    nan where no corner is finite. `ndimage.map_coordinates` keeps the
+    call overhead low for the per-point streamline loop."""
+    field = np.asarray(field, dtype=float)
+    comps = field[..., None] if field.ndim == 2 else field
+    ok = np.isfinite(comps).all(axis=-1)
+    vals = [np.where(ok, comps[..., i], 0.0) for i in range(comps.shape[-1])]
+    weight = ok.astype(float)
+    origin = np.array([grid["xs"][0], grid["ys"][0]])
+    top = np.array([len(grid["xs"]) - 1, len(grid["ys"]) - 1])
+
+    def f(xy):
+        xy = np.asarray(xy, dtype=float)
+        idx = np.clip((np.atleast_2d(xy) - origin) / grid["h"], 0, top)[:, ::-1].T   # (2, N) as (iy, ix)
+        w = ndimage.map_coordinates(weight, idx, order=1)[:, None]
+        num = np.stack([ndimage.map_coordinates(v, idx, order=1) for v in vals], axis=-1)
+        out = np.where(w > 1e-12, num / np.maximum(w, 1e-12), np.nan)
+        out = out[:, 0] if field.ndim == 2 else out
+        return out[0] if xy.ndim == 1 else out
+
+    return f
+
+
 def interp(field, grid, xy):
-    """Bilinear interpolation at `xy`, ignoring non-finite corners (their
-    weight is redistributed). Returns nan if no corner is finite."""
-    h = grid["h"]
-    fx = (xy[0] - grid["xs"][0]) / h
-    fy = (xy[1] - grid["ys"][0]) / h
-    nx, ny = len(grid["xs"]), len(grid["ys"])
-    ix0 = int(np.clip(np.floor(fx), 0, nx - 2))
-    iy0 = int(np.clip(np.floor(fy), 0, ny - 2))
-    tx = float(np.clip(fx - ix0, 0.0, 1.0))
-    ty = float(np.clip(fy - iy0, 0.0, 1.0))
-    vals = np.array([field[iy0, ix0], field[iy0, ix0 + 1], field[iy0 + 1, ix0], field[iy0 + 1, ix0 + 1]])
-    w = np.array([(1 - tx) * (1 - ty), tx * (1 - ty), (1 - tx) * ty, tx * ty])
-    ok = np.isfinite(vals)
-    if not ok.any() or w[ok].sum() < 1e-12:
-        return np.nan
-    return float(np.sum(w[ok] * vals[ok]) / w[ok].sum())
+    """Bilinear interpolation of a scalar grid at `xy` (see
+    `make_interpolator`). Returns a float for one point and an array for
+    (N, 2)."""
+    v = make_interpolator(field, grid)(xy)
+    return float(v) if np.ndim(xy) == 1 else v
 
 
 # --------------------------------------------------------------------------
@@ -120,26 +134,21 @@ def interp(field, grid, xy):
 # --------------------------------------------------------------------------
 
 def geodesic_distance(grid, target_xy, blocked=None):
-    """Geodesic distance from every free cell to `target_xy` (inf in
-    occupied or disconnected cells). `blocked` adds extra occupied cells,
-    e.g. the walls used to force a route around one side of an obstacle."""
+    """Geodesic distance from each free cell to `target_xy`. The distance is
+    inf in occupied or disconnected cells. `blocked` adds occupied cells,
+    for example the walls that force a route around one side of an
+    obstacle."""
     occ = grid["occupied"] if blocked is None else (grid["occupied"] | blocked)
     h = grid["h"]
     tx, ty = target_xy
-    if skfmm is not None:
-        rho = h
-        phi = np.hypot(grid["XX"] - tx, grid["YY"] - ty) - rho
-        d = skfmm.distance(np.ma.MaskedArray(phi, occ), dx=h)
-        d = np.ma.filled(d.astype(float), np.inf) + rho
-    else:  # pragma: no cover
-        from skimage.graph import MCP_Geometric
-        costs = np.where(occ, np.inf, 1.0)
-        cum, _ = MCP_Geometric(costs).find_costs([cell_of(grid, target_xy)])
-        d = cum * h
+    rho = h
+    phi = np.hypot(grid["XX"] - tx, grid["YY"] - ty) - rho
+    d = skfmm.distance(np.ma.MaskedArray(phi, occ), dx=h)
+    d = np.ma.filled(d.astype(float), np.inf) + rho
     d[occ] = np.inf
     d[~np.isfinite(d) | (d > 1e8)] = np.inf
-    # fast marching assigns values to free pockets disconnected from the
-    # target only if they touch the zero contour; anything else stays inf.
+    # Fast marching gives values to a disconnected free pocket only if the
+    # pocket touches the zero contour. Other cells stay inf.
     return d
 
 
@@ -163,7 +172,7 @@ def _diff(f, h, axis):
 
 
 def _wrapped_diff(H, h, axis):
-    """Derivative of an angle field, differencing wrapped angles."""
+    """Derivative of an angle field, from wrapped angle differences."""
     Hf = np.where(np.isfinite(H), H, np.nan)
     pad = [(0, 0), (0, 0)]
     pad[axis] = (1, 1)
@@ -188,7 +197,7 @@ def _smoothstep(w):
 
 
 def heading_field(vx, vy, dist, intervals, blend_radius):
-    """Dead-band orientation rule on the grid (see module docstring)."""
+    """Dead-band orientation rule on the grid (see the module docstring)."""
     travel = np.arctan2(vy, vx)
     out = np.array(travel, dtype=float)
     w = _smoothstep(1.0 - np.where(np.isfinite(dist), dist, np.inf) / blend_radius)
@@ -198,13 +207,13 @@ def heading_field(vx, vy, dist, intervals, blend_radius):
             continue
         r = heading_residual(travel[idx], intervals)
         if r != 0.0:
-            # nearest band edge is travel - r; rotate toward it by weight w
+            # the nearest band edge is travel - r. Turn toward it by the weight w.
             out[idx] = travel[idx] - w[idx] * r
     return out
 
 
 def _potential_field_arrays(problem, grid, target):
-    """Legacy attractor/repeller/swirl field toward one target, on the grid."""
+    """Legacy attractor/repeller/swirl field to one target, on the grid."""
     from legacy.field import bow_signs, desired_heading, desired_velocity
     x, y, th, tol = target
     sub = dataclasses.replace(problem, target=(x, y), target_theta=th, target_theta_tol=tol, targets=None)
@@ -229,16 +238,20 @@ def _potential_field_arrays(problem, grid, target):
 # --------------------------------------------------------------------------
 
 def integrate_reach_path(grid, vx, vy, start, target, step=None, max_len_factor=4.0):
-    """RK4 streamline of the unit field (vx, vy) from `start` until within
-    one cell of `target`. Returns (points (N, 2), arc length, reached)."""
+    """RK4 streamline of the unit field (vx, vy) from `start`. It stops
+    within one cell of `target`, where the field is zero or undefined, or
+    after the maximum step count. Returns (points (N, 2), arc length,
+    reached)."""
     h = grid["h"]
     step = step or 0.5 * h
     target = np.asarray(target, float)
     xmin, ymin, xmax, ymax = grid["bounds"]
     max_steps = int(max_len_factor * np.hypot(xmax - xmin, ymax - ymin) / step)
 
+    field = make_interpolator(np.stack([vx, vy], axis=-1), grid)
+
     def vel(p):
-        v = np.array([interp(vx, grid, p), interp(vy, grid, p)])
+        v = field(p)
         n = np.linalg.norm(v)
         return v / n if np.isfinite(n) and n > 1e-9 else None
 
@@ -268,14 +281,15 @@ def integrate_reach_path(grid, vx, vy, start, target, step=None, max_len_factor=
 
 
 def _hausdorff(a, b):
-    d = np.linalg.norm(a[:, None, :] - b[None, :, :], axis=-1)
-    return float(max(d.min(axis=1).max(), d.min(axis=0).max()))
+    return max(directed_hausdorff(a, b)[0], directed_hausdorff(b, a)[0])
 
 
 def alternative_routes(problem, grid, target_xy, d_default, path_default, tie_tol=ROUTE_TIE_TOL):
-    """Reach paths of the other homotopy classes whose geodesic length is
-    within `tie_tol` of the shortest. Each obstacle's left or right side is
-    blocked by a thin wall to the boundary (2^N_obstacles wall sets)."""
+    """Reach paths of the other homotopy classes with a geodesic length
+    within `tie_tol` of the shortest. Each of the 2^N_obstacles wall sets
+    blocks the left or right side of each obstacle with a thin wall to
+    the boundary. A route must be distinct (`ROUTE_DISTINCT`) from the
+    default path and from the routes before it."""
     base = np.asarray(problem.base, float)
     target_xy = np.asarray(target_xy, float)
     L0 = interp(d_default, grid, base)
@@ -313,13 +327,14 @@ def alternative_routes(problem, grid, target_xy, d_default, path_default, tie_to
 
 def build_geodesic_field(problem, target_sets, field_mode="geodesic", blend_radius=2.0,
                          route_ties=True, tie_tol=ROUTE_TIE_TOL, resolution=None):
-    """Stage 2: one field per feasible target.
+    """Stage 2: one field for each feasible target.
 
-    Returns {"grid", "mode", "backend", "targets": [per-target dict]} where
-    each per-target dict holds the distance grid, unit field (vx, vy), the
-    heading and heading-rate (omega) grids, `geodesic_length` = d_k(base),
-    and `reach_paths` (the default route first, then tied alternatives).
-    Infeasible targets (empty pruned band) get None.
+    Returns {"grid", "mode", "backend", "blend_radius", "targets"}.
+    "targets" has one dict for each target. The dict has the distance
+    grid, the unit field (vx, vy), and the heading and heading-rate
+    (omega) grids. It also has `geodesic_length` = d_k(base),
+    `euclidean_length`, and `reach_paths` (the default route first, then
+    the tied routes). An infeasible target (empty pruned band) has None.
     """
     grid = make_grid(problem, resolution)
     base = np.asarray(problem.base, float)
@@ -353,9 +368,9 @@ def build_geodesic_field(problem, target_sets, field_mode="geodesic", blend_radi
         if field_mode == "geodesic" and (route_ties or not reached):
             alts = alternative_routes(problem, grid, txy, d, pts, tie_tol)
             if not reached and alts:
-                # The base sits on the cut locus (an exact tie), so the
-                # unconstrained streamline runs into the obstacle; the walled
-                # routes resolve the tie. Keep the stalled path for the record.
+                # The base is on the cut locus (an exact tie), so the
+                # unconstrained streamline goes into the obstacle. The walled
+                # routes resolve the tie. The stalled path stays in the record.
                 alts.sort(key=lambda r: r["geodesic_length"])
                 paths = alts if route_ties else alts[:1]
                 paths[0]["stalled_default"] = {"points": pts, "length": length}
@@ -367,33 +382,3 @@ def build_geodesic_field(problem, target_sets, field_mode="geodesic", blend_radi
                     "reach_paths": paths})
     return {"grid": grid, "mode": field_mode, "backend": DISTANCE_BACKEND,
             "blend_radius": blend_radius, "targets": out}
-
-
-def to_stage2_results(problem, field, target_index=0, n_cells=14):
-    """Compatibility adapter: sample one target's field on the legacy
-    n_cells x n_cells grid in the `stage2_results` shape (`center`,
-    `heading`, `generators` (1, 3), `intrinsic_dim`), so legacy plotting
-    such as `run_pipeline.plot_twist_field` keeps working."""
-    grid = field["grid"]
-    tf = field["targets"][target_index]
-    L = problem.length_scale
-    xmin, ymin, xmax, ymax = problem.bounds
-    cw, ch = (xmax - xmin) / n_cells, (ymax - ymin) / n_cells
-    results = {}
-    for i in range(n_cells):
-        for j in range(n_cells):
-            c = np.array([xmin + (i + 0.5) * cw, ymin + (j + 0.5) * ch])
-            if problem.obstacle_clearance(c) < problem.inflation:
-                continue
-            v = np.array([interp(tf["vx"], grid, c), interp(tf["vy"], grid, c)])
-            if not np.all(np.isfinite(v)) or np.linalg.norm(v) < 1e-6:
-                continue
-            v = v / np.linalg.norm(v)
-            w = interp(tf["omega"], grid, c)
-            hd = tf["heading"][cell_of(grid, c)]  # nearest cell: angles do not interpolate linearly
-            results[(i, j)] = {"center": c, "heading": float(hd),
-                               "generators": twist_normalize(np.array([v[0], v[1], w]), L)[None, :],
-                               "intrinsic_dim": 1}
-    meta = {"bounds": problem.bounds, "n_cells": n_cells, "cell_w": cw, "cell_h": ch,
-            "mode": f"{field['mode']}-adapter", "length_scale": L}
-    return results, meta
